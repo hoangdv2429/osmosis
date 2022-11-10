@@ -17,7 +17,7 @@ import (
 // Returns error if:
 // TODO: list error cases
 // TODO: table-driven tests
-func (k Keeper) createPosition(ctx sdk.Context, poolId uint64, owner sdk.AccAddress, amount0Desired, amount1Desired, amount0Min, amount1Min sdk.Int, lowerTick, upperTick int64) (amtDenom0, amtDenom1 sdk.Int, liquidityCreated sdk.Dec, err error) {
+func (k Keeper) createPosition(ctx sdk.Context, poolId uint64, owner sdk.AccAddress, amount0Desired, amount1Desired, amount0Min, amount1Min sdk.Int, lowerTick, upperTick int64) (sdk.Int, sdk.Int, sdk.Dec, error) {
 	// ensure types.MinTick <= lowerTick < types.MaxTick
 	// TODO (bez): Add unit tests.
 	if lowerTick < types.MinTick || lowerTick >= types.MaxTick {
@@ -30,10 +30,6 @@ func (k Keeper) createPosition(ctx sdk.Context, poolId uint64, owner sdk.AccAddr
 		return sdk.Int{}, sdk.Int{}, sdk.Dec{}, fmt.Errorf("invalid upper tick: %d", upperTick)
 	}
 
-	// now calculate amount for token0 and token1
-	pool := k.getPoolbyId(ctx, poolId)
-
-	currentSqrtPrice := pool.CurrentSqrtPrice
 	sqrtRatioUpperTick, err := tickToSqrtPrice(sdk.NewInt(upperTick))
 	if err != nil {
 		return sdk.Int{}, sdk.Int{}, sdk.Dec{}, err
@@ -43,53 +39,31 @@ func (k Keeper) createPosition(ctx sdk.Context, poolId uint64, owner sdk.AccAddr
 		return sdk.Int{}, sdk.Int{}, sdk.Dec{}, err
 	}
 
-	liquidity := getLiquidityFromAmounts(currentSqrtPrice, sqrtRatioLowerTick, sqrtRatioUpperTick, amount0Desired, amount1Desired)
-	if liquidity.IsZero() {
-		return sdk.Int{}, sdk.Int{}, sdk.Dec{}, fmt.Errorf("token in amount is zero")
+	// now calculate amount for token0 and token1
+	pool := k.getPoolbyId(ctx, poolId)
+
+	liquidityDelta := getLiquidityFromAmounts(pool.CurrentSqrtPrice, sqrtRatioLowerTick, sqrtRatioUpperTick, amount0Desired, amount1Desired)
+	if liquidityDelta.IsZero() {
+		return sdk.Int{}, sdk.Int{}, sdk.Dec{}, fmt.Errorf("liquidity delta zero")
 	}
 
-	// update tickInfo state
-	// TODO: come back to sdk.Int vs sdk.Dec state & truncation
-	err = k.initOrUpdateTick(ctx, poolId, lowerTick, liquidity, false)
+	actualAmount0, actualAmount1 := pool.calcActualAmounts(ctx, lowerTick, upperTick, sqrtRatioLowerTick, sqrtRatioUpperTick, amount0Desired, amount1Desired, liquidityDelta)
 	if err != nil {
-		return sdk.Int{}, sdk.Int{}, sdk.Dec{}, err
+		return sdk.ZeroInt(), sdk.ZeroInt(), sdk.ZeroDec(), err
 	}
 
-	// TODO: come back to sdk.Int vs sdk.Dec state & truncation
-	err = k.initOrUpdateTick(ctx, poolId, upperTick, liquidity, true)
-	if err != nil {
-		return sdk.Int{}, sdk.Int{}, sdk.Dec{}, err
-	}
-
-	// update position state
-	// TODO: come back to sdk.Int vs sdk.Dec state & truncation
-	err = k.initOrUpdatePosition(ctx, poolId, owner, lowerTick, upperTick, liquidity)
-	if err != nil {
-		return sdk.Int{}, sdk.Int{}, sdk.Dec{}, err
-	}
-
-	if pool.CurrentTick.LT(sdk.NewInt(lowerTick)) {
-		// outcome one: position is below current price
-		// this means position is solely made up of asset0
-		amtDenom0 = calcAmount0Delta(liquidity, sqrtRatioLowerTick, sqrtRatioUpperTick, false).RoundInt()
-		amtDenom1 = sdk.ZeroInt()
-	} else if pool.CurrentTick.LT(sdk.NewInt(upperTick)) {
-		// outcome two: the current price falls within the position
-		// if this is the case, we attempt to provide liquidity evenly between asset0 and asset1
-		// we also update the pool liquidity since the virtual liquidity is modified by this position's creation
-		amtDenom0 = calcAmount0Delta(liquidity, currentSqrtPrice, sqrtRatioUpperTick, false).RoundInt()
-		amtDenom1 = calcAmount1Delta(liquidity, currentSqrtPrice, sqrtRatioLowerTick, false).RoundInt()
-		pool.Liquidity = pool.Liquidity.Add(liquidity)
-	} else {
-		// outcome three: position is above current price
-		// this means position is solely made up of asset1
-		amtDenom0 = sdk.ZeroInt()
-		amtDenom1 = calcAmount1Delta(liquidity, sqrtRatioLowerTick, sqrtRatioUpperTick, false).RoundInt()
-	}
+	pool.updateLiquidityIfActivePosition(ctx, lowerTick, upperTick, liquidityDelta)
 
 	k.setPoolById(ctx, pool.Id, pool)
 
-	return amtDenom0, amtDenom1, liquidity, nil
+	err = k.updatePosition(ctx, poolId, owner, lowerTick, upperTick, liquidityDelta)
+	if err != nil {
+		return sdk.Int{}, sdk.Int{}, sdk.Dec{}, err
+	}
+
+	// TODO: handle amount0Min, amount1Min
+
+	return actualAmount0, actualAmount1, liquidityDelta, nil
 }
 
 // withdrawPosition withdraws a concentrated liquidity position from the given pool id in the given tick range and liquidityAmount.
@@ -101,4 +75,80 @@ func (k Keeper) createPosition(ctx sdk.Context, poolId uint64, owner sdk.AccAddr
 // TODO: implement and table-driven tests
 func (k Keeper) withdrawPosition(ctx sdk.Context, poolId uint64, owner sdk.AccAddress, lowerTick, upperTick int64, liquidityAmount sdk.Int) (amtDenom0, amtDenom1 sdk.Int, err error) {
 	panic("not implemented")
+}
+
+// TODO: spec and tests.
+func (k Keeper) updatePosition(ctx sdk.Context, poolId uint64, owner sdk.AccAddress, lowerTick, upperTick int64, liquidityDelta sdk.Dec) error {
+
+	// update tickInfo state
+	// TODO: come back to sdk.Int vs sdk.Dec state & truncation
+	err := k.initOrUpdateTick(ctx, poolId, lowerTick, liquidityDelta, false)
+	if err != nil {
+		return err
+	}
+
+	// TODO: come back to sdk.Int vs sdk.Dec state & truncation
+	err = k.initOrUpdateTick(ctx, poolId, upperTick, liquidityDelta, true)
+	if err != nil {
+		return err
+	}
+
+	// update position state
+	// TODO: come back to sdk.Int vs sdk.Dec state & truncation
+	err = k.initOrUpdatePosition(ctx, poolId, owner, lowerTick, upperTick, liquidityDelta)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// calcActualAmounts calculates and returns actual amounts based on where the current tick is located relative to position's
+// lower and upper ticks.
+// There are 3 possible cases:
+// -The position is active ( lowerTick <= p.CurrentTick < upperTick).
+//    * The provided liqudity is distributed in both tokens.
+//    * Actual amounts might differ from desired because we recalculate them from liquidity delta and sqrt price.
+//      the calculations lead to amounts being off. // TODO: confirm logic is correct
+// - Current tick is below the position ( p.CurrentTick < lowerTick).
+//    * The provided liquidity is distributed in token0 only.
+// - Current tick is above the position ( p.CurrentTick >= p.upperTick ).
+//    * The provided liquidity is distributed in token1 only.
+// TODO: add tests.
+func (p Pool) calcActualAmounts(ctx sdk.Context, lowerTick, upperTick int64, sqrtRatioLowerTick, sqrtRatioUpperTick sdk.Dec, amount0Desired, amount1Desired sdk.Int, liquidityDelta sdk.Dec) (actualAmountDenom0 sdk.Int, actualAmountDenom1 sdk.Int) {
+
+	if p.isPositionActive(lowerTick, upperTick) {
+		// outcome one: the current price falls within the position
+		// if this is the case, we attempt to provide liquidity evenly between asset0 and asset1
+		// we also update the pool liquidity since the virtual liquidity is modified by this position's creation
+		currentSqrtPrice := p.CurrentSqrtPrice
+		actualAmountDenom0 = calcAmount0Delta(liquidityDelta, currentSqrtPrice, sqrtRatioUpperTick, false).RoundInt()
+		actualAmountDenom1 = calcAmount1Delta(liquidityDelta, currentSqrtPrice, sqrtRatioLowerTick, false).RoundInt()
+	} else if p.CurrentTick.LT(sdk.NewInt(lowerTick)) {
+		// outcome two: position is below current price
+		// this means position is solely made up of asset0
+		actualAmountDenom1 = sdk.ZeroInt()
+		actualAmountDenom0 = calcAmount0Delta(liquidityDelta, sqrtRatioLowerTick, sqrtRatioUpperTick, false).RoundInt()
+	} else {
+		// outcome three: position is above current price
+		// this means position is solely made up of asset1
+		actualAmountDenom0 = sdk.ZeroInt()
+		actualAmountDenom1 = calcAmount1Delta(liquidityDelta, sqrtRatioLowerTick, sqrtRatioUpperTick, false).RoundInt()
+	}
+
+	return actualAmountDenom0, actualAmountDenom1
+}
+
+// TODO: add tests.
+func (p Pool) isPositionActive(lowerTick, upperTick int64) bool {
+	return p.CurrentTick.GTE(sdk.NewInt(lowerTick)) && p.CurrentTick.LT(sdk.NewInt(upperTick))
+}
+
+// TODO: add tests.
+func (p *Pool) updateLiquidityIfActivePosition(ctx sdk.Context, lowerTick, upperTick int64, liquidityDelta sdk.Dec) bool {
+	if p.isPositionActive(lowerTick, upperTick) {
+		p.Liquidity = p.Liquidity.Add(liquidityDelta)
+		return true
+	}
+	return false
 }
