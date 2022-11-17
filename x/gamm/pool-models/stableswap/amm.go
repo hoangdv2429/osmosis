@@ -76,6 +76,8 @@ func cfmmConstantMulti(xReserve, yReserve, u, v osmomath.BigDec) osmomath.BigDec
 // xy(x^2 + y^2) = (x - a)(y + b)((x - a)^2 + (y + b)^2)
 // and the following expression for `a` in multi-asset pools:
 // xyz(x^2 + y^2 + w) = (x - a)(y + b)z((x - a)^2 + (y + b)^2 + w)
+// TODO: explain where z comes from, it seems that we only use sum squares
+// in solveCFMMBinarySearchMulti (w).
 func solveCfmm(xReserve, yReserve osmomath.BigDec, remReserves []osmomath.BigDec, yIn osmomath.BigDec) osmomath.BigDec {
 	wSumSquares := osmomath.ZeroDec()
 	for _, assetReserve := range remReserves {
@@ -290,7 +292,6 @@ func deriveUpperLowerXFinalReserveBounds(xReserve, yReserve, wSumSquares, yFinal
 
 	k0 := cfmmConstantMultiNoV(xReserve, yFinal, wSumSquares)
 	k := cfmmConstantMultiNoV(xReserve, yReserve, wSumSquares)
-	// fmt.Println(k0, k)
 	if k0.Equal(zero) || k.Equal(zero) {
 		panic("k should never be zero")
 	}
@@ -317,7 +318,7 @@ func solveCFMMBinarySearchMulti(xReserve, yReserve, wSumSquares, yIn osmomath.Bi
 	} else if yIn.Abs().GTE(yReserve) {
 		panic("cannot input more than pool reserves")
 	}
-	// fmt.Printf("solve cfmm xreserve %v, yreserve %v, w %v, yin %v\n", xReserve, yReserve, wSumSquares, yIn)
+
 	yFinal := yReserve.Add(yIn)
 	xLowEst, xHighEst := deriveUpperLowerXFinalReserveBounds(xReserve, yReserve, wSumSquares, yFinal)
 	targetK := targetKCalculator(xReserve, yReserve, wSumSquares, yFinal)
@@ -344,7 +345,6 @@ func solveCFMMBinarySearchMulti(xReserve, yReserve, wSumSquares, yIn osmomath.Bi
 	}
 
 	xOut := xReserve.Sub(xEst)
-	// fmt.Printf("xOut %v\n", xOut)
 
 	// We check the absolute value of the output against the xReserve amount to ensure that:
 	// 1. Swaps cannot more than double the input token's pool supply
@@ -397,9 +397,7 @@ func (p Pool) calcOutAmtGivenIn(tokenIn sdk.Coin, tokenOutDenom string, swapFee 
 	// amm input = tokenIn * (1 - swap fee)
 	ammIn := tokenInDec.Mul(oneMinus(swapFee))
 	// We are solving for the amount of token out, hence x = tokenOutSupply, y = tokenInSupply
-	// fmt.Printf("outSupply %s, inSupply %s, remReservs %s, ammIn %s\n ", tokenOutSupply, tokenInSupply, remReserves, ammIn)
 	cfmmOut := solveCfmm(tokenOutSupply, tokenInSupply, remReserves, ammIn)
-	// fmt.Println("cfmmout ", cfmmOut)
 	outAmt := p.getDescaledPoolAmt(tokenOutDenom, cfmmOut)
 	return outAmt, nil
 }
