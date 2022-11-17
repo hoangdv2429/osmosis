@@ -1,6 +1,7 @@
 package test_helpers
 
 import (
+	"fmt"
 	"math/rand"
 	"testing"
 
@@ -47,11 +48,15 @@ func TestCalculateAmountOutAndIn_InverseRelationship(
 	actualTokenIn, err := pool.CalcInAmtGivenOut(ctx, initialOutCoins, assetInDenom, swapFee)
 	require.NoError(t, err)
 
+	fmt.Println("calc target output amt: ", initialOutCoins)
+	fmt.Println("calc calculated input amt: ", actualTokenIn)
 	// we expect that any output less than 1 will always be rounded up
 	require.True(t, actualTokenIn.Amount.GTE(sdk.OneInt()))
 
 	inverseTokenOut, err := pool.CalcOutAmtGivenIn(ctx, sdk.NewCoins(actualTokenIn), assetOutDenom, swapFee)
 	require.NoError(t, err)
+
+	fmt.Println("calc actual output amt: ", inverseTokenOut)
 
 	require.Equal(t, initialOut.Denom, inverseTokenOut.Denom)
 
@@ -66,10 +71,77 @@ func TestCalculateAmountOutAndIn_InverseRelationship(
 	if preFeeTokenIn.Equal(sdk.OneInt()) {
 		require.True(t, actual.GT(expected))
 	} else {
-		// allow a rounding error of up to 1 for this relation
-		// TODO: Ensure rounding is correct
-		tol := sdk.NewDec(1)
-		osmoassert.DecApproxEq(t, expected, actual, tol)
+		// We allow for either a small geometric error of 10^-8 or an additive of 1 due to our spot price being an approximation
+		diff := (expected.Sub(actual)).Abs()
+		errTerm := diff.Quo(sdk.MinDec(expected, actual))
+		passesMultiplicative := errTerm.LT(sdk.NewDecWithPrec(1, 8))
+		if !passesMultiplicative {
+			osmoassert.DecApproxEq(t, expected, actual , sdk.OneDec(), "Expected: %d, Actual: %d, name %s", expected, actual)
+		}
+
+		// should never output more than originally passed in
+		require.True(t, actual.LTE(expected))
+	}
+}
+
+func TestSwapAmountOutAndIn_InverseRelationship(
+	t *testing.T,
+	ctx sdk.Context,
+	pool types.PoolI,
+	assetInDenom string,
+	assetOutDenom string,
+	initialCalcOut int64,
+	swapFee sdk.Dec,
+) {
+	initialOut := sdk.NewInt64Coin(assetOutDenom, initialCalcOut)
+	initialOutCoins := sdk.NewCoins(initialOut)
+
+	zeroFeeTokenIn, err := pool.CalcInAmtGivenOut(ctx, initialOutCoins, assetInDenom, sdk.ZeroDec())
+	require.NoError(t, err)
+	actualTokenIn, err := pool.SwapInAmtGivenOut(ctx, initialOutCoins, assetInDenom, swapFee)
+	require.NoError(t, err)
+
+	expectedTokenIn := zeroFeeTokenIn.Amount.ToDec().QuoRoundUp(sdk.OneDec().Sub(swapFee))
+	fmt.Println("swap target output amt: ", initialOutCoins)
+	fmt.Println("swap calculated input amt: ", actualTokenIn)
+	fmt.Println("swap zero fee input amt: ", zeroFeeTokenIn)
+	fmt.Println("swap expected input amt: ", expectedTokenIn)
+	if swapFee.IsZero() {
+		require.True(t, zeroFeeTokenIn.Amount.ToDec().Equal(actualTokenIn.Amount.ToDec()))
+	} else {
+		require.True(t, zeroFeeTokenIn.Amount.ToDec().LT(actualTokenIn.Amount.ToDec()))
+	}
+
+	// we expect that any output less than 1 will always be rounded up
+	require.True(t, actualTokenIn.Amount.GTE(sdk.OneInt()))
+
+	inverseTokenOut, err := pool.SwapOutAmtGivenIn(ctx, sdk.NewCoins(actualTokenIn), assetOutDenom, swapFee)
+	require.NoError(t, err)
+	fmt.Println("swap actual output amt: ", inverseTokenOut)
+
+	require.Equal(t, initialOut.Denom, inverseTokenOut.Denom)
+
+	expected := initialOut.Amount.ToDec()
+	actual := inverseTokenOut.Amount.ToDec()
+
+	// If the pool is extremely imbalanced (specifically in the case of stableswap),
+	// we expect there to be drastically amplified error that will fall outside our usual bounds.
+	// Since these cases are effectively unusable by design, we only really care about whether
+	// they are safe i.e. round correctly.
+	preFeeTokenIn := actualTokenIn.Amount.ToDec().Mul((sdk.OneDec().Sub(swapFee))).Ceil().TruncateInt()
+	if preFeeTokenIn.Equal(sdk.OneInt()) {
+		require.True(t, actual.GT(expected))
+	} else {
+		// We allow for a small geometric error due to our spot price being an approximation
+		diff := (expected.Sub(actual)).Abs()
+		errTerm := diff.Quo(sdk.MinDec(expected, actual))
+		passesMultiplicative := errTerm.LT(sdk.NewDecWithPrec(1, 8))
+		if !passesMultiplicative {
+			osmoassert.DecApproxEq(t, expected, actual, sdk.OneDec(), "Expected: %d, Actual: %d", expected, actual)
+		}
+		
+		// should never output more than originally passed in
+		require.True(t, actual.LTE(expected))
 	}
 }
 
